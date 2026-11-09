@@ -29,6 +29,7 @@
   <h2>Interactive Controls & Geometric Primitives</h2>
   <p>Edit vertex and fragment shaders on the left to get the result instantly.<br>
   Hover over a shape to hit-test it (GPU picking with readPixels): it tints red. Click a shape to toggle it yellow.<br>
+Click the main shape, then click the blue cube: the main shape moves next to it.<br>
 Use arrow keys and w, s keys to move the camera.<br>
 Save your code to source file if you want to save it.<br>
 Press F12 to see the console for debugging.</p>
@@ -107,6 +108,7 @@ uniform float paletteT;
 uniform float patternSize;
 uniform float blur;
 uniform float patternRot;
+uniform vec4 uBaseColor; // a = 1.0 means use this rgb instead of the pattern
 uniform float uSelected; // 1.0 when this shape has been clicked on
 uniform float uHover;    // 1.0 when this shape is under the mouse
 
@@ -153,6 +155,7 @@ void main() {
     default: value = 1.0;     break;
 }  
 vec3 fc = palette(value*paletteT, paletteParams[0],paletteParams[1],paletteParams[2],paletteParams[3]);// swap in stripes or dots and use palette
+fc = mix(fc, uBaseColor.rgb, uBaseColor.a);        // solid color (blue cube)
 fc = mix(fc, vec3(1.0, 1.0, 0.0), uSelected);     // selected shapes are yellow
 fc = mix(fc, vec3(1.0, 0.0, 0.0), 0.4 * uHover);  // red tint on hover
 fragColor = vec4(fc, 1.0);
@@ -216,7 +219,7 @@ void main() {
     vertEditor.value = document.getElementById("vertex-shader").textContent;
     fragEditor.value = document.getElementById("fragment-shader").textContent;
 
-    let program, posLoc, colorLoc, uMVM, uPM, uMTM, uvLoc, uSelected, uHover;
+    let program, posLoc, colorLoc, uMVM, uPM, uMTM, uvLoc, uSelected, uHover, uBaseColor;
     let vbo, nbo, ibo, uvbo;
 
     let shapeCounter = 0;
@@ -283,6 +286,10 @@ void main() {
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
 
       b.count = idx.length;
+
+      // half-width along x, used to place shapes side by side
+      b.extent = 0;
+      for (let i = 0; i < pos.length; i += 3) b.extent = Math.max(b.extent, Math.abs(pos[i]));
       return b;
     }
 
@@ -323,6 +330,7 @@ void main() {
         patternNum = gl.getUniformLocation(program, "patternNum");
         uSelected = gl.getUniformLocation(program, "uSelected");
         uHover = gl.getUniformLocation(program, "uHover");
+        uBaseColor = gl.getUniformLocation(program, "uBaseColor");
 
       } catch (e) { console.error(e); }
     }
@@ -443,6 +451,16 @@ void main() {
     const pyramidDir = [-0.5, 0.0,  0.866];
     const sphereDir  = [-0.5, 0.0, -0.866];
 
+    // object IDs (0 = background)
+    const PARENT_ID = 1, BLUE_ID = 5;
+
+    // parent position in world space; changed by "click parent, then click blue cube"
+    let parentPos = [0, 0, 0];
+
+    // blue target cube, top left, not part of the hierarchy
+    const bluePos = [-2.0, 1.4, 0];
+    const blueScale = 0.4;
+
 //put palette values here
 
     const paletteValues = new Float32Array([0.5, 0.5, 0.5,   0.5, 0.5, 0.5,   1, 1, 1,   0, 0.33, 0.67]);
@@ -536,7 +554,7 @@ const patternBtn = document.getElementById("patternBtn");
       let modelViewMatrix = mat4Translate(mat4Identity(), [camX, camY, camZ]);
 
       // parent: the main shape's model matrix
-      let parent = mat4Identity();
+      let parent = mat4Translate(mat4Identity(), parentPos);
 
       let mainBuffers;
       if (shape === "Cube") mainBuffers = cubeBuffers;
@@ -550,6 +568,8 @@ const patternBtn = document.getElementById("patternBtn");
         { id: 2, name: "Cube (child)",      buffers: cubeBuffers,    matrix: mat4Scale(mat4Translate(parent, cubeDir.map(v => v * dist)),    s) },
         { id: 3, name: "Pyramid (child)",   buffers: pyramidBuffers, matrix: mat4Scale(mat4Translate(parent, pyramidDir.map(v => v * dist)), s) },
         { id: 4, name: "Sphere (child)",    buffers: sphereBuffers,  matrix: mat4Scale(mat4Translate(parent, sphereDir.map(v => v * dist)),  s) },
+        { id: BLUE_ID, name: "Blue cube",   buffers: cubeBuffers,    matrix: mat4Scale(mat4Translate(mat4Identity(), bluePos), [blueScale, blueScale, blueScale]),
+          color: [0.1, 0.3, 1.0] },
       ];
 
       // hit test pass (offscreen)
@@ -559,7 +579,15 @@ const patternBtn = document.getElementById("patternBtn");
 
       if (clickPending) {
         clickPending = false;
-        if (hoveredId !== 0) {
+        if (hoveredId === BLUE_ID) {
+          // blue cube is a target: if the parent is selected, move it right next to the blue cube
+          if (selected.has(PARENT_ID)) {
+            const gap = 0.1;
+            const offset = cubeBuffers.extent * blueScale + mainBuffers.extent + gap;
+            parentPos = [bluePos[0] + offset, bluePos[1], bluePos[2]];
+            selected.delete(PARENT_ID);
+          }
+        } else if (hoveredId !== 0) {
           if (selected.has(hoveredId)) selected.delete(hoveredId);
           else selected.add(hoveredId);
         }
@@ -587,6 +615,8 @@ const patternBtn = document.getElementById("patternBtn");
       for (const o of objects) {
         gl.uniform1f(uSelected, selected.has(o.id) ? 1.0 : 0.0);
         gl.uniform1f(uHover, o.id === hoveredId ? 1.0 : 0.0);
+        if (o.color) gl.uniform4f(uBaseColor, o.color[0], o.color[1], o.color[2], 1.0);
+        else gl.uniform4f(uBaseColor, 0, 0, 0, 0);
         drawShape(o.buffers, o.matrix);
       }
     }
