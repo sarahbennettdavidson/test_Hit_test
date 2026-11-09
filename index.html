@@ -49,14 +49,6 @@ Press F12 to see the console for debugging.</p>
 
       <div style="max-height: 150px; overflow-y: auto; width: 400px;">
       <div style="display: flex; gap: 20px;">
-        <div>
-          <label>Rotate X <input type="range" id="xRotSlider" min="-5" max="5" step="0.1" value="0"></label><br>
-          <label>Rotate Y <input type="range" id="YRotSlider" min="-5" max="5" step="0.1" value="0"></label><br>
-          <label>Rotate Z <input type="range" id="zRotSlider" min="-5" max="5" step="0.1" value="0"></label><br>
-          <label>Shear X <input type="range" id="xShearSlider" min="0" max="1" step="0.1" value="0"></label><br>
-          <label>Shear Y <input type="range" id="yShearSlider" min="0" max="1" step="0.1" value="0"></label><br>
-          <label>Shear Z <input type="range" id="zShearSlider" min="0" max="1" step="0.1" value="0"></label>
-        </div>
           <label>Distance <input type="range" id="distSlider" min="-3" max="3" step="0.01" value="1.0"></label>
         <div style="display: flex; flex-direction: column; gap: 5px;">
           <button id="shapeBtn">Cube</button>
@@ -85,7 +77,6 @@ in vec3 aColor;
 in vec2 aUV;      
 
 
-uniform float uTime; //time in sec
 uniform mat4 uModelViewMatrix;
 uniform mat4 uProjectionMatrix;
 uniform mat4 uModelTransformationMatrix;
@@ -201,7 +192,7 @@ fragColor = vec4(fc, 1.0);
     vertEditor.value = document.getElementById("vertex-shader").textContent;
     fragEditor.value = document.getElementById("fragment-shader").textContent;
 
-    let program, posLoc, colorLoc, timeLoc, uMVM, uPM, uMTM, uvLoc;
+    let program, posLoc, colorLoc, uMVM, uPM, uMTM, uvLoc;
     let vbo, nbo, ibo, uvbo;
 
     let shapeCounter = 0;
@@ -302,7 +293,6 @@ fragColor = vec4(fc, 1.0);
         posLoc = gl.getAttribLocation(program, "aPosition");
         colorLoc = gl.getAttribLocation(program, "aColor");
         uvLoc = gl.getAttribLocation(program, "aUV");
-        timeLoc = gl.getUniformLocation(program, "uTime");
         uMVM = gl.getUniformLocation(program, "uModelViewMatrix");
         uPM = gl.getUniformLocation(program, "uProjectionMatrix");
         uMTM = gl.getUniformLocation(program, "uModelTransformationMatrix");
@@ -315,7 +305,7 @@ fragColor = vec4(fc, 1.0);
     fragEditor.onkeyup = initShaderProgram;
 
     // Mouse and keyboard interactions
-    let mouseDown = false, lastX, lastY, cubeRotX = 0, cubeRotY = 0, cubeRotZ = 0;
+    let mouseDown = false, lastX, lastY, cubeRotX = 0, cubeRotY = 0;
     let camX = 0, camY = 0, camZ = -6;
 
     canvas.addEventListener('mousedown', e => { mouseDown = true; lastX = e.clientX; lastY = e.clientY; });
@@ -341,22 +331,6 @@ fragColor = vec4(fc, 1.0);
       }
     });
 
-    const yRotSlider = document.getElementById("YRotSlider");
-    const xRotSlider = document.getElementById("xRotSlider");
-    const zRotSlider = document.getElementById("zRotSlider");
-
-    const xShearSlider = document.getElementById("xShearSlider");
-    let xShear = parseFloat(xShearSlider.value);
-    xShearSlider.addEventListener("input", () => { xShear = parseFloat(xShearSlider.value); });
-
-    const yShearSlider = document.getElementById("yShearSlider");
-    let yShear = parseFloat(yShearSlider.value);
-    yShearSlider.addEventListener("input", () => { yShear = parseFloat(yShearSlider.value); });
-
-    const zShearSlider = document.getElementById("zShearSlider");
-    let zShear = parseFloat(zShearSlider.value);
-    zShearSlider.addEventListener("input", () => { zShear = parseFloat(zShearSlider.value); });    
-    
     const distSlider = document.getElementById("distSlider");
     let dist = parseFloat(distSlider.value);
     distSlider.addEventListener("input", () => { dist = parseFloat(distSlider.value); });
@@ -453,52 +427,24 @@ const patternBtn = document.getElementById("patternBtn");
       patternBtn.textContent = pattern;
 });
 
-    let startTime = Date.now();
-
     function render() {
       gl.enable(gl.DEPTH_TEST);
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-      cubeRotY += parseFloat(yRotSlider.value) * 0.01;
-      cubeRotX += parseFloat(xRotSlider.value) * 0.01;
-      cubeRotZ += parseFloat(zRotSlider.value) * 0.01;
-
-
-      // rotation matrices
+      // rotation matrices (changed only by mouse drag)
       let cx = Math.cos(cubeRotY), sx = Math.sin(cubeRotY);
       let cy = Math.cos(cubeRotX), sy = Math.sin(cubeRotX);
-      let cz = Math.cos(cubeRotZ), sz = Math.sin(cubeRotZ);
 
       let rotX = [1, 0, 0, 0, 0, cy, sy, 0, 0, -sy, cy, 0, 0, 0, 0, 1];
       let rotY = [cx, 0, -sx, 0, 0, 1, 0, 0, sx, 0, cx, 0, 0, 0, 0, 1];
-      let rotZ = [cz, sz, 0, 0, -sz, cz, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
-      let cubeRotation = multiplyMat4(multiplyMat4(rotY, rotX), rotZ);
+      // parent: the main shape's model matrix
+      let modelTransformationMatrix = multiplyMat4(rotY, rotX);
 
-      // init model-view matrix as identity matrix
-      let modelViewMatrix = mat4Identity();
-      // init model transformation matrix as identity matrix
-      let modelTransformationMatrix = mat4Identity();
-
-      //delta time in ms
-      let deltaTime = Date.now() - startTime;
-      // object rotation
-      modelTransformationMatrix = multiplyMat4(modelTransformationMatrix, cubeRotation);
-       //shearing
-      let amt = Math.abs(Math.sin(deltaTime / 1000));
-      let xShearAmt = xShear * amt;
-      let yShearAmt = yShear * amt;
-      let zShearAmt = zShear * amt;
-
-      modelTransformationMatrix = mat4ShearX(modelTransformationMatrix, xShearAmt);
-      modelTransformationMatrix = mat4ShearY(modelTransformationMatrix, yShearAmt);
-      modelTransformationMatrix = mat4ShearZ(modelTransformationMatrix, zShearAmt);
       // camera translation
-      modelViewMatrix = mat4Translate(modelViewMatrix, [camX, camY, camZ]);
-      
-      //set time in seconds
-      gl.uniform1f(timeLoc, deltaTime/1000.0);
+      let modelViewMatrix = mat4Translate(mat4Identity(), [camX, camY, camZ]);
+
       gl.uniformMatrix4fv(uPM, false, proj);
       gl.uniformMatrix4fv(uMVM, false, modelViewMatrix);
 
@@ -517,15 +463,15 @@ const patternBtn = document.getElementById("patternBtn");
       else if (shape === "Pyramid") mainBuffers = pyramidBuffers;
       else mainBuffers = sphereBuffers;
 
-            // orbiters: one of each shape, circling the main shape
-      let orbitAngle = deltaTime / 1000;
-      let orbitBase = mat4RotateY(cubeRotation, orbitAngle);
-
-      drawShape(cubeBuffers,    mat4Scale(mat4Translate(orbitBase, [cubeDir[0] * dist,    cubeDir[1] * dist,    cubeDir[2] * dist]),    [0.4, 0.4, 0.4]));
-      drawShape(pyramidBuffers, mat4Scale(mat4Translate(orbitBase, [pyramidDir[0] * dist, pyramidDir[1] * dist, pyramidDir[2] * dist]), [0.4, 0.4, 0.4]));
-      drawShape(sphereBuffers,  mat4Scale(mat4Translate(orbitBase, [sphereDir[0] * dist,  sphereDir[1] * dist,  sphereDir[2] * dist]),  [0.4, 0.4, 0.4]));
-
       drawShape(mainBuffers, modelTransformationMatrix);
+
+      // children: one of each shape, placed around the main shape.
+      // each child = parent * translate * scale, so they follow the parent's rotation.
+      let parent = modelTransformationMatrix;
+
+      drawShape(cubeBuffers,    mat4Scale(mat4Translate(parent, [cubeDir[0] * dist,    cubeDir[1] * dist,    cubeDir[2] * dist]),    [0.4, 0.4, 0.4]));
+      drawShape(pyramidBuffers, mat4Scale(mat4Translate(parent, [pyramidDir[0] * dist, pyramidDir[1] * dist, pyramidDir[2] * dist]), [0.4, 0.4, 0.4]));
+      drawShape(sphereBuffers,  mat4Scale(mat4Translate(parent, [sphereDir[0] * dist,  sphereDir[1] * dist,  sphereDir[2] * dist]),  [0.4, 0.4, 0.4]));
     }
 
     // Initialize when page loads
