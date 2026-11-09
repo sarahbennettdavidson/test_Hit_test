@@ -28,7 +28,7 @@
 <body>
   <h2>Interactive Controls & Geometric Primitives</h2>
   <p>Edit vertex and fragment shaders on the left to get the result instantly.<br>
-  Use mouse to drag and rotate the cube. <br>
+  Hover over a shape to hit-test it (GPU picking with readPixels): it tints red. Click a shape to toggle it yellow.<br>
 Use arrow keys and w, s keys to move the camera.<br>
 Save your code to source file if you want to save it.<br>
 Press F12 to see the console for debugging.</p>
@@ -46,6 +46,7 @@ Press F12 to see the console for debugging.</p>
     </div>
     <div>
       <canvas id="glcanvas" width="400" height="400"></canvas>
+      <div id="hitReadout">hit: none</div>
 
       <div style="max-height: 150px; overflow-y: auto; width: 400px;">
       <div style="display: flex; gap: 20px;">
@@ -106,6 +107,8 @@ uniform float paletteT;
 uniform float patternSize;
 uniform float blur;
 uniform float patternRot;
+uniform float uSelected; // 1.0 when this shape has been clicked on
+uniform float uHover;    // 1.0 when this shape is under the mouse
 
 out vec4 fragColor;
 
@@ -150,8 +153,29 @@ void main() {
     default: value = 1.0;     break;
 }  
 vec3 fc = palette(value*paletteT, paletteParams[0],paletteParams[1],paletteParams[2],paletteParams[3]);// swap in stripes or dots and use palette
-fragColor = vec4(fc, 1.0);   
+fc = mix(fc, vec3(1.0, 1.0, 0.0), uSelected);     // selected shapes are yellow
+fc = mix(fc, vec3(1.0, 0.0, 0.0), 0.4 * uHover);  // red tint on hover
+fragColor = vec4(fc, 1.0);
 //fragColor = vec4(vUV, 0.0, 1.0);//uv test
+}
+</script>
+
+  <!-- Picking shaders: same transform, flat ID color -->
+  <script id="pick-vertex-shader" type="x-shader/x-vertex">#version 300 es
+in vec3 aPosition;
+uniform mat4 uModelViewMatrix;
+uniform mat4 uProjectionMatrix;
+uniform mat4 uModelTransformationMatrix;
+void main() {
+  gl_Position = uProjectionMatrix * uModelViewMatrix * uModelTransformationMatrix * vec4(aPosition, 1.0);
+}
+</script>
+  <script id="pick-fragment-shader" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+uniform vec4 uPickColor; // object ID packed into RGB
+out vec4 fragColor;
+void main() {
+  fragColor = uPickColor;
 }
 </script>
 
@@ -192,7 +216,7 @@ fragColor = vec4(fc, 1.0);
     vertEditor.value = document.getElementById("vertex-shader").textContent;
     fragEditor.value = document.getElementById("fragment-shader").textContent;
 
-    let program, posLoc, colorLoc, uMVM, uPM, uMTM, uvLoc;
+    let program, posLoc, colorLoc, uMVM, uPM, uMTM, uvLoc, uSelected, uHover;
     let vbo, nbo, ibo, uvbo;
 
     let shapeCounter = 0;
@@ -297,6 +321,8 @@ fragColor = vec4(fc, 1.0);
         uPM = gl.getUniformLocation(program, "uProjectionMatrix");
         uMTM = gl.getUniformLocation(program, "uModelTransformationMatrix");
         patternNum = gl.getUniformLocation(program, "patternNum");
+        uSelected = gl.getUniformLocation(program, "uSelected");
+        uHover = gl.getUniformLocation(program, "uHover");
 
       } catch (e) { console.error(e); }
     }
@@ -304,20 +330,98 @@ fragColor = vec4(fc, 1.0);
     vertEditor.onkeyup = initShaderProgram;
     fragEditor.onkeyup = initShaderProgram;
 
-    // Mouse and keyboard interactions
-    let mouseDown = false, lastX, lastY, cubeRotX = 0, cubeRotY = 0;
-    let camX = 0, camY = 0, camZ = -6;
+    // ---- GPU picking (readPixels hit test) ----
+    // Each object is drawn into an offscreen framebuffer in a flat color that encodes its ID.
+    // Then the one pixel under the mouse is read back and decoded.
+    const pickProgram = createProgram(gl,
+      document.getElementById("pick-vertex-shader").textContent,
+      document.getElementById("pick-fragment-shader").textContent);
+    const pickPosLoc   = gl.getAttribLocation(pickProgram, "aPosition");
+    const pickPM       = gl.getUniformLocation(pickProgram, "uProjectionMatrix");
+    const pickMVM      = gl.getUniformLocation(pickProgram, "uModelViewMatrix");
+    const pickMTM      = gl.getUniformLocation(pickProgram, "uModelTransformationMatrix");
+    const pickColorLoc = gl.getUniformLocation(pickProgram, "uPickColor");
 
-    canvas.addEventListener('mousedown', e => { mouseDown = true; lastX = e.clientX; lastY = e.clientY; });
-    canvas.addEventListener('mouseup', () => mouseDown = false);
+    // color target (RGBA8, no antialiasing, so IDs come back exact)
+    const pickTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, pickTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+    // depth target, so the front-most object wins
+    const pickDepth = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, pickDepth);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, canvas.width, canvas.height);
+
+    const pickFBO = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pickFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pickTex, 0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, pickDepth);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) console.error("pick framebuffer incomplete");
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    const pickPixel = new Uint8Array(4);
+    let mouseX = null, mouseY = null;  // framebuffer pixel under the mouse, origin bottom-left
+    let hoveredId = 0;                 // 0 = background
+    const hitReadout = document.getElementById("hitReadout");
+
     canvas.addEventListener('mousemove', e => {
-      if (!mouseDown) return;
-      let dx = e.clientX - lastX;
-      let dy = e.clientY - lastY;
-      cubeRotY += dx * 0.01;
-      cubeRotX += dy * 0.01;
-      lastX = e.clientX; lastY = e.clientY;
+      const rect = canvas.getBoundingClientRect();
+      // CSS pixels -> canvas pixels (skips the border, handles CSS scaling)
+      const x = Math.floor((e.clientX - rect.left - canvas.clientLeft) * canvas.width / canvas.clientWidth);
+      const y = Math.floor((e.clientY - rect.top - canvas.clientTop) * canvas.height / canvas.clientHeight);
+      if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) { mouseX = mouseY = null; return; }
+      mouseX = x;
+      mouseY = canvas.height - 1 - y;  // readPixels counts rows from the bottom
     });
+    canvas.addEventListener('mouseleave', () => { mouseX = mouseY = null; });
+
+    // click toggles selection; handled in render() right after that frame's pick
+    const selected = new Set();   // IDs of shapes that are currently yellow
+    let clickPending = false;
+    canvas.addEventListener('click', () => { clickPending = true; });
+
+    // returns the ID of the object under the mouse, 0 if none
+    function pick(objects, modelViewMatrix) {
+      if (mouseX === null) return 0;
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, pickFBO);
+      gl.useProgram(pickProgram);
+      gl.enable(gl.DEPTH_TEST);
+
+      // only rasterize the single pixel under the mouse
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(mouseX, mouseY, 1, 1);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      gl.uniformMatrix4fv(pickPM, false, proj);
+      gl.uniformMatrix4fv(pickMVM, false, modelViewMatrix);
+
+      for (const o of objects) {
+        gl.uniform4f(pickColorLoc,
+          ( o.id        & 255) / 255,
+          ((o.id >> 8)  & 255) / 255,
+          ((o.id >> 16) & 255) / 255, 1);
+        gl.uniformMatrix4fv(pickMTM, false, o.matrix);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, o.buffers.vbo);
+        gl.enableVertexAttribArray(pickPosLoc);
+        gl.vertexAttribPointer(pickPosLoc, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, o.buffers.ibo);
+        gl.drawElements(gl.TRIANGLES, o.buffers.count, gl.UNSIGNED_SHORT, 0);
+      }
+
+      gl.readPixels(mouseX, mouseY, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pickPixel);
+
+      gl.disable(gl.SCISSOR_TEST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return pickPixel[0] | (pickPixel[1] << 8) | (pickPixel[2] << 16);
+    }
+
+    // Keyboard camera controls
+    let camX = 0, camY = 0, camZ = -6;
 
     document.addEventListener('keydown', e => {
       const step = 0.2;
@@ -428,22 +532,45 @@ const patternBtn = document.getElementById("patternBtn");
 });
 
     function render() {
+      // camera translation
+      let modelViewMatrix = mat4Translate(mat4Identity(), [camX, camY, camZ]);
+
+      // parent: the main shape's model matrix
+      let parent = mat4Identity();
+
+      let mainBuffers;
+      if (shape === "Cube") mainBuffers = cubeBuffers;
+      else if (shape === "Pyramid") mainBuffers = pyramidBuffers;
+      else mainBuffers = sphereBuffers;
+
+      // children = parent * translate * scale, so they follow the parent
+      const s = [0.4, 0.4, 0.4];
+      const objects = [
+        { id: 1, name: shape + " (parent)", buffers: mainBuffers,    matrix: parent },
+        { id: 2, name: "Cube (child)",      buffers: cubeBuffers,    matrix: mat4Scale(mat4Translate(parent, cubeDir.map(v => v * dist)),    s) },
+        { id: 3, name: "Pyramid (child)",   buffers: pyramidBuffers, matrix: mat4Scale(mat4Translate(parent, pyramidDir.map(v => v * dist)), s) },
+        { id: 4, name: "Sphere (child)",    buffers: sphereBuffers,  matrix: mat4Scale(mat4Translate(parent, sphereDir.map(v => v * dist)),  s) },
+      ];
+
+      // hit test pass (offscreen)
+      hoveredId = pick(objects, modelViewMatrix);
+      const hit = objects.find(o => o.id === hoveredId);
+      hitReadout.textContent = "hit: " + (hit ? hit.name : "none");
+
+      if (clickPending) {
+        clickPending = false;
+        if (hoveredId !== 0) {
+          if (selected.has(hoveredId)) selected.delete(hoveredId);
+          else selected.add(hoveredId);
+        }
+      }
+
+      // visible pass
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.useProgram(program);
       gl.enable(gl.DEPTH_TEST);
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-      // rotation matrices (changed only by mouse drag)
-      let cx = Math.cos(cubeRotY), sx = Math.sin(cubeRotY);
-      let cy = Math.cos(cubeRotX), sy = Math.sin(cubeRotX);
-
-      let rotX = [1, 0, 0, 0, 0, cy, sy, 0, 0, -sy, cy, 0, 0, 0, 0, 1];
-      let rotY = [cx, 0, -sx, 0, 0, 1, 0, 0, sx, 0, cx, 0, 0, 0, 0, 1];
-
-      // parent: the main shape's model matrix
-      let modelTransformationMatrix = multiplyMat4(rotY, rotX);
-
-      // camera translation
-      let modelViewMatrix = mat4Translate(mat4Identity(), [camX, camY, camZ]);
 
       gl.uniformMatrix4fv(uPM, false, proj);
       gl.uniformMatrix4fv(uMVM, false, modelViewMatrix);
@@ -457,21 +584,11 @@ const patternBtn = document.getElementById("patternBtn");
       gl.uniform1f(gl.getUniformLocation(program, "patternRot"), patternRot);
 
 
-      //main shape
-      let mainBuffers;
-      if (shape === "Cube") mainBuffers = cubeBuffers;
-      else if (shape === "Pyramid") mainBuffers = pyramidBuffers;
-      else mainBuffers = sphereBuffers;
-
-      drawShape(mainBuffers, modelTransformationMatrix);
-
-      // children: one of each shape, placed around the main shape.
-      // each child = parent * translate * scale, so they follow the parent's rotation.
-      let parent = modelTransformationMatrix;
-
-      drawShape(cubeBuffers,    mat4Scale(mat4Translate(parent, [cubeDir[0] * dist,    cubeDir[1] * dist,    cubeDir[2] * dist]),    [0.4, 0.4, 0.4]));
-      drawShape(pyramidBuffers, mat4Scale(mat4Translate(parent, [pyramidDir[0] * dist, pyramidDir[1] * dist, pyramidDir[2] * dist]), [0.4, 0.4, 0.4]));
-      drawShape(sphereBuffers,  mat4Scale(mat4Translate(parent, [sphereDir[0] * dist,  sphereDir[1] * dist,  sphereDir[2] * dist]),  [0.4, 0.4, 0.4]));
+      for (const o of objects) {
+        gl.uniform1f(uSelected, selected.has(o.id) ? 1.0 : 0.0);
+        gl.uniform1f(uHover, o.id === hoveredId ? 1.0 : 0.0);
+        drawShape(o.buffers, o.matrix);
+      }
     }
 
     // Initialize when page loads
